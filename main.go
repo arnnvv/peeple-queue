@@ -9,14 +9,35 @@ import (
 )
 
 var (
-	clients   = make(map[chan string]bool)
-	clientsMu sync.Mutex
+	clients   = make(map[chan []byte]bool)
+	clientsMu sync.RWMutex
 )
 
 type UploadRequest struct {
 	Image1 string `json:"image1"`
 	Image2 string `json:"image2"`
 }
+
+var homeHTML = []byte(`<!DOCTYPE html>
+<html>
+<head>
+	<title>Image Display</title>
+</head>
+<body>
+	<h1>Image Display</h1>
+	<div id="images" class="images"></div>
+	<script>
+		const imagesDiv = document.getElementById('images');
+		const eventSource = new EventSource('/events');
+		eventSource.onmessage = (e) => {
+			const data = JSON.parse(e.data);
+			imagesDiv.innerHTML = 
+				'<img src="' + data.image1 + '">' +
+				'<img src="' + data.image2 + '">';
+		};
+	</script>
+</body>
+</html>`)
 
 func main() {
 	http.HandleFunc("/events", sseHandler)
@@ -28,29 +49,28 @@ func main() {
 }
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req UploadRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 		return
 	}
 
 	if req.Image1 == "" || req.Image2 == "" {
-		http.Error(w, "Both image1 and image2 URLs are required", http.StatusBadRequest)
+		http.Error(w, "Both image URLs are required", http.StatusBadRequest)
 		return
 	}
 
-	message := fmt.Sprintf(`{"image1": "%s", "image2": "%s"}`, req.Image1, req.Image2)
-	broadcast(message)
+	msg, _ := json.Marshal(req)
+	broadcast(msg)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, message)
+	w.Write(msg)
 }
 
 func sseHandler(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +85,8 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageChan := make(chan string)
+	messageChan := make(chan []byte, 1) // Buffered channel
+
 	clientsMu.Lock()
 	clients[messageChan] = true
 	clientsMu.Unlock()
@@ -88,41 +109,20 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func broadcast(msg string) {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
+func broadcast(msg []byte) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
 
 	for client := range clients {
 		select {
 		case client <- msg:
 		default:
+			// Drop message if client buffer is full
 		}
 	}
 }
 
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, `<!DOCTYPE html>
-<html>
-<head>
-	<title>Image Display</title>
-</head>
-<body>
-	<h1>Image Display</h1>
-	<div id="images" class="images"></div>
-
-	<script>
-		const imagesDiv = document.getElementById('images');
-
-		const eventSource = new EventSource('/events');
-		eventSource.onmessage = (e) => {
-			const data = JSON.parse(e.data);
-			imagesDiv.innerHTML = 
-				'<img src="' + data.image1 + '">' +
-				'<img src="' + data.image2 + '">'
-			;
-		};
-	</script>
-</body>
-</html>`)
+	w.Write(homeHTML)
 }
