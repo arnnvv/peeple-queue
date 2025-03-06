@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	_ "github.com/lib/pq"
+
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,7 +21,7 @@ var (
 )
 
 type Claims struct {
-	UserID uint `json:"userId"`
+	UserID uint `json:"user_id"`
 	jwt.RegisteredClaims
 }
 
@@ -105,52 +107,59 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		secret := []byte(os.Getenv("JWT_SECRET"))
 		if len(secret) == 0 {
-			fmt.Println("JWT_SECRET is not set")
+			http.Error(w, "Server configuration error", http.StatusInternalServerError)
 			return
 		}
 
 		claims := &Claims{}
-
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
 			return secret, nil
 		})
+
 		if err != nil {
-			fmt.Println("Error parsing token:", err)
-			return
-		}
-
-		if !token.Valid {
-			fmt.Println("Token is invalid")
-			return
-		}
-
-		fmt.Printf("Extracted User ID: %v\n", claims.UserID)
-
-		var connStr = os.Getenv("DATABASE_URL")
-		db, err := sql.Open("postgres", connStr)
-		if err != nil {
-			panic(err)
-		}
-		defer db.Close()
-
-		var verificationStatus string
-		err = db.QueryRow("SELECT verification_status FROM users WHERE id = $1", claims.UserID).Scan(&verificationStatus)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				http.Error(w, "Unauthorized - user not found", http.StatusUnauthorized)
+			if err == jwt.ErrTokenMalformed {
+				http.Error(w, "Invalid token format", http.StatusUnauthorized)
 			} else {
-				http.Error(w, "Database error", http.StatusInternalServerError)
-				fmt.Println("Database error:", err)
+				http.Error(w, "Authentication failed", http.StatusUnauthorized)
 			}
 			return
 		}
 
-		if verificationStatus == "false" || verificationStatus == "'false'" {
-			next(w, r)
-		} else {
+		if !token.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+		fmt.Printf("Full claims: %+v\n", claims)
+
+		if claims.UserID == 0 {
+			http.Error(w, "Invalid user claims", http.StatusUnauthorized)
+			return
+		}
+
+		var connStr = os.Getenv("DATABASE_URL")
+		db, err := sql.Open("postgres", connStr)
+		if err != nil {
+			http.Error(w, "Database error 1", http.StatusInternalServerError)
+			return
+		}
+		defer db.Close()
+
+		var verificationStatus bool
+		err = db.QueryRow("SELECT verification_status FROM users WHERE id = $1", claims.UserID).Scan(&verificationStatus)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "User not found", http.StatusUnauthorized)
+			} else {
+				http.Error(w, "Database error 2", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		if verificationStatus {
 			http.Error(w, "Already Requested", http.StatusConflict)
 			return
 		}
 
+		next(w, r)
 	}
 }
