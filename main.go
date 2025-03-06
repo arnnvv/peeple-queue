@@ -6,71 +6,35 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
 var (
 	clients   = make(map[chan []byte]bool)
 	clientsMu sync.RWMutex
+	counter   = 0
 )
 
-type UploadRequest struct {
-	Image1 string `json:"image1"`
-	Image2 string `json:"image2"`
-}
-
-var homeHTML = []byte(`<!DOCTYPE html>
-<html>
-<head>
-	<title>Image Display</title>
-</head>
-<body>
-	<h1>Image Display</h1>
-	<div id="images" class="images"></div>
-	<script>
-		const imagesDiv = document.getElementById('images');
-		const eventSource = new EventSource('/events');
-		eventSource.onmessage = (e) => {
-			const data = JSON.parse(e.data);
-			imagesDiv.innerHTML = 
-				'<img src="' + data.image1 + '">' +
-				'<img src="' + data.image2 + '">';
-		};
-	</script>
-</body>
-</html>`)
-
 func main() {
-	http.HandleFunc("/events", sseHandler)
-	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/", homeHandler)
+	generateAndSendNumber()
 
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			counter++
+			generateAndSendNumber()
+		}
+	}()
+
+	http.HandleFunc("/events", sseHandler)
 	log.Println("Server running at http://127.0.0.1:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req UploadRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
-		return
-	}
-
-	if req.Image1 == "" || req.Image2 == "" {
-		http.Error(w, "Both image URLs are required", http.StatusBadRequest)
-		return
-	}
-
-	msg, _ := json.Marshal(req)
+func generateAndSendNumber() {
+	msg, _ := json.Marshal(map[string]any{"number": counter})
 	broadcast(msg)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(msg)
 }
 
 func sseHandler(w http.ResponseWriter, r *http.Request) {
@@ -85,11 +49,15 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageChan := make(chan []byte, 1) // Buffered channel
+	messageChan := make(chan []byte, 1)
 
 	clientsMu.Lock()
 	clients[messageChan] = true
 	clientsMu.Unlock()
+
+	msg, _ := json.Marshal(map[string]any{"number": counter})
+	fmt.Fprintf(w, "data: %s\n\n", msg)
+	flusher.Flush()
 
 	defer func() {
 		clientsMu.Lock()
@@ -112,17 +80,10 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 func broadcast(msg []byte) {
 	clientsMu.RLock()
 	defer clientsMu.RUnlock()
-
 	for client := range clients {
 		select {
 		case client <- msg:
 		default:
-			// Drop message if client buffer is full
 		}
 	}
-}
-
-func homeHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.Write(homeHTML)
 }
