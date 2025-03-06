@@ -6,35 +6,26 @@ import (
 	"log"
 	"net/http"
 	"sync"
-	"time"
 )
 
 var (
 	clients   = make(map[chan []byte]bool)
 	clientsMu sync.RWMutex
-	counter   = 0
 )
 
 func main() {
-	generateAndSendNumber()
-
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			counter++
-			generateAndSendNumber()
-		}
-	}()
-
 	http.HandleFunc("/events", sseHandler)
+	http.HandleFunc("/trigger", triggerHandler)
+
 	log.Println("Server running at http://127.0.0.1:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func generateAndSendNumber() {
-	msg, _ := json.Marshal(map[string]any{"number": counter})
+func triggerHandler(w http.ResponseWriter, r *http.Request) {
+	msg, _ := json.Marshal(map[string]any{"number": 1})
 	broadcast(msg)
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Triggered"))
 }
 
 func sseHandler(w http.ResponseWriter, r *http.Request) {
@@ -50,12 +41,11 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	messageChan := make(chan []byte, 1)
-
 	clientsMu.Lock()
 	clients[messageChan] = true
 	clientsMu.Unlock()
 
-	msg, _ := json.Marshal(map[string]any{"number": counter})
+	msg, _ := json.Marshal(map[string]any{"number": 1})
 	fmt.Fprintf(w, "data: %s\n\n", msg)
 	flusher.Flush()
 
