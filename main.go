@@ -57,10 +57,6 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 	clients[messageChan] = true
 	clientsMu.Unlock()
 
-	msg, _ := json.Marshal(map[string]any{"number": 1})
-	fmt.Fprintf(w, "data: %s\n\n", msg)
-	flusher.Flush()
-
 	defer func() {
 		clientsMu.Lock()
 		delete(clients, messageChan)
