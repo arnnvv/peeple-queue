@@ -26,11 +26,12 @@ type Claims struct {
 }
 
 func main() {
+	port := os.Getenv("PORT")
 	http.HandleFunc("/events", sseHandler)
 	http.HandleFunc("/trigger", authMiddleware(triggerHandler))
 
-	log.Println("Server running at http://127.0.0.1:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Printf("Server running at http://127.0.0.1:%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 func triggerHandler(w http.ResponseWriter, r *http.Request) {

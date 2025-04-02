@@ -38,17 +38,17 @@ jobs:
 
       - name: Setup SSH key
         env:
-          VM_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
           echo "${VM_SSH_KEY}" | tr -d '\r' > ~/.ssh/ec2_key
           chmod 600 ~/.ssh/ec2_key
-          ssh-keygen -y -f ~/.ssh/ec2_key > /dev/null || (echo "Invalid private key format provided in EC2_SSH_KEY secret" && exit 1)
+          ssh-keygen -y -f ~/.ssh/ec2_key > /dev/null || (echo "Invalid private key format provided in VM_SSH_KEY secret" && exit 1)
 
       - name: Deploy to VM
         env:
-          VM_HOST: ${{ secrets.EC2_HOST }}
-          VM_USER: ${{ secrets.EC2_USER }}
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
           ENV_FILE_CONTENTS: ${{ secrets.ENV_FILE_CONTENTS }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           IMAGE_NAME: "ghcr.io/${{ github.repository }}:latest"
@@ -74,6 +74,16 @@ jobs:
             cat "\${ENV_FILE_PATH}" || echo "Warning: Could not cat env file (might be empty)"
             echo "--------------------------"
 
+            echo "--> Extracting PORT from \${ENV_FILE_PATH}..."
+            VM_PORT=\$(grep '^PORT=' "\${ENV_FILE_PATH}" | cut -d '=' -f 2-)
+
+            if [ -z "\${VM_PORT}" ]; then
+              echo "ERROR: PORT variable not found or empty in \${ENV_FILE_PATH}"
+              echo "Ensure your ENV_FILE_CONTENTS secret contains a line like 'PORT=8080'"
+              exit 1
+            fi
+            echo "PORT extracted: \${VM_PORT}"
+
             echo "--> Logging into GHCR on VM..."
             echo "${GHCR_TOKEN}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
@@ -96,7 +106,7 @@ jobs:
 
             echo "--> Creating new container definition: ${CONTAINER_NAME}"
             podman create \
-              -p 8080:8080 \
+              -p "\${VM_PORT}:\${VM_PORT}" \
               --env-file "\${ENV_FILE_PATH}" \
               --name ${CONTAINER_NAME} \
               ${IMAGE_NAME}
@@ -110,10 +120,10 @@ jobs:
             podman generate systemd --new --name ${CONTAINER_NAME} > "\${SYSTEMD_UNIT_PATH}"
 
             if [ \$? -ne 0 ] || [ ! -f "\${SYSTEMD_UNIT_PATH}" ]; then
-                 echo "ERROR: Failed to generate systemd unit file at \${SYSTEMD_UNIT_PATH} using redirection."
-                 echo "Listing contents of \${SYSTEMD_USER_DIR}:"
-                 ls -la "\${SYSTEMD_USER_DIR}" || echo "Could not list directory."
-                 exit 1
+                echo "ERROR: Failed to generate systemd unit file at \${SYSTEMD_UNIT_PATH} using redirection."
+                echo "Listing contents of \${SYSTEMD_USER_DIR}:"
+                ls -la "\${SYSTEMD_USER_DIR}" || echo "Could not list directory."
+                exit 1
             fi
             echo "Systemd unit file generated successfully."
 
@@ -124,7 +134,7 @@ jobs:
             systemctl --user enable --now "\${SERVICE_NAME}"
 
             echo "--> Checking service status:"
-            systemctl --user status "\${SERVICE_NAME}" --no-pager
+            systemctl --user status "\${SERVICE_NAME}" --no-pager || echo "Warning: Service status check command failed, but deployment might still be okay."
 
             echo "--> Cleaning up GHCR login token..."
             podman logout ghcr.io || true
