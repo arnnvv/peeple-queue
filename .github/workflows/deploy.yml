@@ -106,19 +106,16 @@ jobs:
                 exit 1
             fi
 
-            echo "--> Generating systemd unit file: \${SYSTEMD_UNIT_PATH}"
+            echo "--> Generating systemd unit file using redirection: \${SYSTEMD_UNIT_PATH}"
+            podman generate systemd --new --name ${CONTAINER_NAME} > "\${SYSTEMD_UNIT_PATH}"
 
-            podman generate systemd --new --files --name ${CONTAINER_NAME} --output "\${SYSTEMD_USER_DIR}"
-
-            if [ ! -f "\${SYSTEMD_UNIT_PATH}" ]; then
-                 echo "ERROR: Failed to generate systemd unit file at \${SYSTEMD_UNIT_PATH}"
-                 echo "Attempting fallback generation..."
-                 podman generate systemd --new --name ${CONTAINER_NAME} > "\${SYSTEMD_UNIT_PATH}"
-                 if [ \$? -ne 0 ] || [ ! -f "\${SYSTEMD_UNIT_PATH}" ]; then
-                   echo "ERROR: Fallback generation also failed."
-                   exit 1
-                 fi
+            if [ \$? -ne 0 ] || [ ! -f "\${SYSTEMD_UNIT_PATH}" ]; then
+                 echo "ERROR: Failed to generate systemd unit file at \${SYSTEMD_UNIT_PATH} using redirection."
+                 echo "Listing contents of \${SYSTEMD_USER_DIR}:"
+                 ls -la "\${SYSTEMD_USER_DIR}" || echo "Could not list directory."
+                 exit 1
             fi
+            echo "Systemd unit file generated successfully."
 
             echo "--> Reloading systemd user daemon..."
             systemctl --user daemon-reload
