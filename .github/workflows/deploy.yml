@@ -46,7 +46,7 @@ jobs:
           # Basic key validation
           ssh-keygen -y -f ~/.ssh/ec2_key > /dev/null || (echo "Invalid private key format provided in EC2_SSH_KEY secret" && exit 1)
 
-      - name: Deploy to VM
+- name: Deploy to VM
         env:
           VM_HOST: ${{ secrets.EC2_HOST }}
           VM_USER: ${{ secrets.EC2_USER }}
@@ -56,16 +56,24 @@ jobs:
           CONTAINER_NAME: "peeple"
         run: |
           echo "Connecting to ${VM_USER}@${VM_HOST}..."
-          # Use a Heredoc (<<EOF) to send multiple commands over SSH
           ssh -i ~/.ssh/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${VM_USER}@${VM_HOST} /bin/bash <<EOF
             set -e
 
             echo "--> Setting up environment on VM..."
-            mkdir -p ~/.config/${CONTAINER_NAME}
-            mkdir -p ~/.config/systemd/user
+            CONFIG_DIR="\$HOME/.config/${CONTAINER_NAME}"
+            SYSTEMD_USER_DIR="\$HOME/.config/systemd/user"
+            ENV_FILE_PATH="\${CONFIG_DIR}/.env"
 
-            echo "${ENV_FILE_CONTENTS}" > ~/.config/${CONTAINER_NAME}/.env
-            ENV_FILE_PATH="~/.config/${CONTAINER_NAME}/.env"
+            mkdir -p "\${CONFIG_DIR}"
+            mkdir -p "\${SYSTEMD_USER_DIR}"
+
+            echo "${ENV_FILE_CONTENTS}" > "\${ENV_FILE_PATH}"
+
+            echo "--> Verifying env file exists at: \${ENV_FILE_PATH}"
+            ls -l "\${ENV_FILE_PATH}"
+            echo "--- Env file contents: ---"
+            cat "\${ENV_FILE_PATH}" || echo "Warning: Could not cat env file (might be empty)"
+            echo "--------------------------"
 
             echo "--> Logging into GHCR on VM..."
             echo "${GHCR_TOKEN}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -74,14 +82,14 @@ jobs:
             podman pull ${IMAGE_NAME}
 
             SERVICE_NAME="${CONTAINER_NAME}.service"
-            SYSTEMD_UNIT_PATH="~/.config/systemd/user/${SERVICE_NAME}"
+            SYSTEMD_UNIT_PATH="\${SYSTEMD_USER_DIR}/\${SERVICE_NAME}"
 
             echo "--> Stopping and removing existing container (if any)..."
-            if systemctl --user is-active --quiet ${SERVICE_NAME}; then
-              echo "Stopping running systemd service: ${SERVICE_NAME}"
-              systemctl --user stop ${SERVICE_NAME}
+            if systemctl --user is-active --quiet "\${SERVICE_NAME}"; then
+              echo "Stopping running systemd service: \${SERVICE_NAME}"
+              systemctl --user stop "\${SERVICE_NAME}"
             else
-              echo "Systemd service ${SERVICE_NAME} not active, attempting podman stop..."
+              echo "Systemd service \${SERVICE_NAME} not active, attempting podman stop..."
               podman stop ${CONTAINER_NAME} || true
             fi
 
@@ -90,7 +98,7 @@ jobs:
             echo "--> Creating new container definition: ${CONTAINER_NAME}"
             podman create \
               -p 8080:8080 \
-              --env-file \${ENV_FILE_PATH} \
+              --env-file "\${ENV_FILE_PATH}" \
               --name ${CONTAINER_NAME} \
               ${IMAGE_NAME}
 
@@ -99,8 +107,10 @@ jobs:
                 exit 1
             fi
 
-            echo "--> Generating systemd unit file: ${SYSTEMD_UNIT_PATH}"
-            podman generate systemd --new --files --name ${CONTAINER_NAME} --output ~/.config/systemd/user
+            echo "--> Generating systemd unit file: \${SYSTEMD_UNIT_PATH}"
+
+            podman generate systemd --new --files --name ${CONTAINER_NAME} --output "\${SYSTEMD_USER_DIR}"
+
             if [ ! -f "\${SYSTEMD_UNIT_PATH}" ]; then
                  echo "ERROR: Failed to generate systemd unit file at \${SYSTEMD_UNIT_PATH}"
                  echo "Attempting fallback generation..."
@@ -114,11 +124,11 @@ jobs:
             echo "--> Reloading systemd user daemon..."
             systemctl --user daemon-reload
 
-            echo "--> Enabling and starting systemd service: ${SERVICE_NAME}"
-            systemctl --user enable --now ${SERVICE_NAME}
+            echo "--> Enabling and starting systemd service: \${SERVICE_NAME}"
+            systemctl --user enable --now "\${SERVICE_NAME}"
 
             echo "--> Checking service status:"
-            systemctl --user status ${SERVICE_NAME} --no-pager
+            systemctl --user status "\${SERVICE_NAME}" --no-pager
 
             echo "--> Cleaning up GHCR login token..."
             podman logout ghcr.io || true
@@ -126,7 +136,8 @@ jobs:
             echo "--> Deployment successful!"
           EOF
 
-          if [ $? -ne 0 ]; then
-            echo "Deployment script failed on remote host."
+          SSH_EXIT_CODE=$?
+          if [ ${SSH_EXIT_CODE} -ne 0 ]; then
+            echo "Deployment script failed on remote host with exit code ${SSH_EXIT_CODE}."
             exit 1
           fi
