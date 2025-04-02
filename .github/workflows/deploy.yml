@@ -43,10 +43,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "${VM_SSH_KEY}" | tr -d '\r' > ~/.ssh/ec2_key
           chmod 600 ~/.ssh/ec2_key
-          # Basic key validation
           ssh-keygen -y -f ~/.ssh/ec2_key > /dev/null || (echo "Invalid private key format provided in EC2_SSH_KEY secret" && exit 1)
 
-- name: Deploy to VM
+      - name: Deploy to VM
         env:
           VM_HOST: ${{ secrets.EC2_HOST }}
           VM_USER: ${{ secrets.EC2_USER }}
