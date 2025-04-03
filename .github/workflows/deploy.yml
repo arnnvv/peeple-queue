@@ -52,7 +52,7 @@ jobs:
           ENV_FILE_CONTENTS: ${{ secrets.ENV_FILE_CONTENTS }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           IMAGE_NAME: "ghcr.io/${{ github.repository }}:latest"
-          CONTAINER_NAME: "peeple"
+          CONTAINER_NAME: "${{ github.event.repository.name }}_container"
         run: |
           echo "Connecting to ${VM_USER}@${VM_HOST}..."
           ssh -i ~/.ssh/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${VM_USER}@${VM_HOST} /bin/bash <<EOF
