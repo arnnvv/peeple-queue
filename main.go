@@ -2,7 +2,7 @@ package main
 
 import (
 	"database/sql"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5"
 
 	"encoding/json"
 	"fmt"
