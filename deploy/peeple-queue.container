@@ -1,0 +1,15 @@
+[Unit]
+Description=Peeple Queue API Service
+After=network-online.target
+
+[Container]
+Image=ghcr.io/arnnvv/peeple-queue:latest
+
+EnvironmentFile=%h/.config/peeple-queue/.env
+
+PublishPort=8080:8080
+
+Exec=always
+
+[Install]
+WantedBy=default.target
