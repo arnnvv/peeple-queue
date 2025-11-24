@@ -2,23 +2,32 @@ package main
 
 import (
 	"database/sql"
-	_ "github.com/jackc/pgx/v5"
-
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-var (
-	clients   = make(map[chan []byte]bool)
+type Config struct {
+	Port        string
+	JwtSecret   []byte
+	DatabaseURL string
+}
+
+type Server struct {
+	db        *sql.DB
+	config    Config
+	clients   map[chan []byte]bool
 	clientsMu sync.RWMutex
-)
+	logger    *slog.Logger
+}
 
 type Claims struct {
 	UserID uint `json:"user_id"`
@@ -26,22 +35,87 @@ type Claims struct {
 }
 
 func main() {
-	port := os.Getenv("PORT")
-	http.HandleFunc("/events", sseHandler)
-	http.HandleFunc("/trigger", authMiddleware(triggerHandler))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	log.Printf("Server running at http://127.0.0.1:%s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	cfg := loadConfig()
+
+	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("Failed to open database connection", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		logger.Error("Failed to ping database", "error", err)
+		os.Exit(1)
+	}
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	srv := &Server{
+		db:      db,
+		config:  cfg,
+		clients: make(map[chan []byte]bool),
+		logger:  logger,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/events", srv.sseHandler)
+	mux.HandleFunc("/trigger", srv.authMiddleware(srv.triggerHandler))
+
+	logger.Info("Server starting", "port", cfg.Port)
+	server := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: mux,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
+		logger.Error("Server failed", "error", err)
+		os.Exit(1)
+	}
 }
 
-func triggerHandler(w http.ResponseWriter, r *http.Request) {
-	msg, _ := json.Marshal(map[string]any{"number": 1})
-	broadcast(msg)
+func loadConfig() Config {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		slog.Warn("JWT_SECRET is not set")
+	}
+
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		slog.Warn("DATABASE_URL is not set")
+	}
+
+	return Config{
+		Port:        port,
+		JwtSecret:   []byte(secret),
+		DatabaseURL: dbURL,
+	}
+}
+
+func (s *Server) triggerHandler(w http.ResponseWriter, r *http.Request) {
+	payload := map[string]any{"number": 1, "timestamp": time.Now().Unix()}
+	msg, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, "JSON error", http.StatusInternalServerError)
+		return
+	}
+
+	s.broadcast(msg)
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Triggered"))
 }
 
-func sseHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) sseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -53,20 +127,24 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageChan := make(chan []byte, 1)
-	clientsMu.Lock()
-	clients[messageChan] = true
-	clientsMu.Unlock()
+	messageChan := make(chan []byte, 10)
 
-	msg, _ := json.Marshal(map[string]any{"number": 1})
-	fmt.Fprintf(w, "data: %s\n\n", msg)
+	s.clientsMu.Lock()
+	s.clients[messageChan] = true
+	s.clientsMu.Unlock()
+
+	s.logger.Info("New SSE client connected")
+
+	initMsg, _ := json.Marshal(map[string]any{"status": "connected"})
+	fmt.Fprintf(w, "data: %s\n\n", initMsg)
 	flusher.Flush()
 
 	defer func() {
-		clientsMu.Lock()
-		delete(clients, messageChan)
-		clientsMu.Unlock()
+		s.clientsMu.Lock()
+		delete(s.clients, messageChan)
+		s.clientsMu.Unlock()
 		close(messageChan)
+		s.logger.Info("SSE client disconnected")
 	}()
 
 	for {
@@ -80,18 +158,20 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func broadcast(msg []byte) {
-	clientsMu.RLock()
-	defer clientsMu.RUnlock()
-	for client := range clients {
+func (s *Server) broadcast(msg []byte) {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	for clientChan := range s.clients {
 		select {
-		case client <- msg:
+		case clientChan <- msg:
 		default:
+			s.logger.Warn("Dropping message for slow client")
 		}
 	}
 }
 
-func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
@@ -106,52 +186,31 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		tokenString := parts[1]
 
-		secret := []byte(os.Getenv("JWT_SECRET"))
-		if len(secret) == 0 {
-			http.Error(w, "Server configuration error", http.StatusInternalServerError)
-			return
-		}
-
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
-			return secret, nil
+			return s.config.JwtSecret, nil
 		})
 
-		if err != nil {
-			if err == jwt.ErrTokenMalformed {
-				http.Error(w, "Invalid token format", http.StatusUnauthorized)
-			} else {
-				http.Error(w, "Authentication failed", http.StatusUnauthorized)
-			}
+		if err != nil || !token.Valid {
+			s.logger.Warn("Invalid token attempt", "error", err)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-
-		if !token.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
-		fmt.Printf("Full claims: %+v\n", claims)
 
 		if claims.UserID == 0 {
 			http.Error(w, "Invalid user claims", http.StatusUnauthorized)
 			return
 		}
 
-		var connStr = os.Getenv("DATABASE_URL")
-		db, err := sql.Open("postgres", connStr)
-		if err != nil {
-			http.Error(w, "Database error 1", http.StatusInternalServerError)
-			return
-		}
-		defer db.Close()
-
 		var verificationStatus bool
-		err = db.QueryRow("SELECT verification_status FROM users WHERE id = $1", claims.UserID).Scan(&verificationStatus)
+		err = s.db.QueryRow("SELECT verification_status FROM users WHERE id = $1", claims.UserID).Scan(&verificationStatus)
+
 		if err != nil {
 			if err == sql.ErrNoRows {
 				http.Error(w, "User not found", http.StatusUnauthorized)
 			} else {
-				http.Error(w, "Database error 2", http.StatusInternalServerError)
+				s.logger.Error("Database query error", "error", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			}
 			return
 		}
